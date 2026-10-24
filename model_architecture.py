@@ -1,4 +1,3 @@
-"""Architectures extraites du notebook original decision-level-fusion.ipynb, cellules 12 et 14."""
 NUM_SEGMENTS = 8
 DROPOUT = 0.35
 TASK_N_CLASSES = {"distraction": 8, "drowsiness": 3, "gaze": 2, "hands": 3}

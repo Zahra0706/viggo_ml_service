@@ -1,7 +1,3 @@
-"""
-Phase 6F — Mission 1 : Test de parité ONNX
-Vérifie que l'inférence locale produit exactement les mêmes logits que parity_expected.json.
-"""
 import json
 import numpy as np
 import onnxruntime as ort
