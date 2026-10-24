@@ -339,3 +339,100 @@ class SwinInferenceService:
 
         finally:
             cap.release()
+
+    def predict_image(
+        self,
+        image_bytes: bytes,
+        rotation_degrees: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Analyse une image fixe unique (JPEG / PNG / WEBP) capturée pendant un trajet actif :
+        1. Décode les octets bruts en BGR via cv2.imdecode sans écriture disque.
+        2. Détecte la présence du conducteur via Haar cascade.
+        3. Prétraite conformément à preprocessing.json (RGB, resize 224x224, ImageNet norm, NCHW float32).
+        4. Exécute l'inférence Swin Transformer ONNX avec thread-safety.
+        5. Calcule les scores softmax des 6 classes, l'entropie et les alertes de cadrage.
+        """
+        if not image_bytes:
+            raise ValueError("L'image fournie est vide (0 octet).")
+
+        t_start = time.perf_counter()
+
+        # 1. Décodage mémoire sans écriture disque
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if frame_bgr is None or frame_bgr.size == 0:
+            raise ValueError("Impossible de décoder les données de l'image (format corrompu ou non supporté).")
+
+        h, w = frame_bgr.shape[:2]
+
+        # 2. Détection de présence conducteur et prétraitement
+        t0_p = time.perf_counter()
+        has_driver = self.check_driver_presence(frame_bgr)
+        tensor = self.preprocess_frame(frame_bgr, rotation_degrees=rotation_degrees)
+        preproc_ms = (time.perf_counter() - t0_p) * 1000
+
+        # 3. Inférence ONNX
+        t0_i = time.perf_counter()
+        logits, scores, class_idx = self.predict_single_tensor(tensor)
+        infer_ms = (time.perf_counter() - t0_i) * 1000
+
+        total_elapsed_ms = (time.perf_counter() - t_start) * 1000
+
+        # 4. Métriques et avertissements de cadrage
+        eps = 1e-9
+        entropy = float(-np.sum(scores * np.log(scores + eps)))
+        confidence = float(scores[class_idx])
+        predicted_label = self.labels[class_idx]
+
+        warnings: List[str] = []
+        is_reliable = True
+
+        if not has_driver:
+            warnings.append(
+                "Visage du conducteur non détecté : cadrage potentiellement inadapté ou obscurité."
+            )
+            is_reliable = False
+
+        if confidence < 0.35 or entropy > 1.6:
+            warnings.append(
+                "Niveau de confiance faible ou forte ambiguïté sur la prédiction."
+            )
+            is_reliable = False
+
+        scores_dict = {
+            label: round(float(scores[i]), 5)
+            for i, label in enumerate(self.labels)
+        }
+
+        return {
+            "model": "driver_swin.onnx",
+            "framework": "ONNX Runtime (CPU)",
+            "prediction": {
+                "class": predicted_label,
+                "class_index": class_idx,
+                "confidence": round(confidence, 5),
+                "is_reliable": is_reliable,
+            },
+            "scores": scores_dict,
+            "driver_detected": has_driver,
+            "framing_status": "good" if has_driver else "uncertain",
+            "image_metadata": {
+                "width": w,
+                "height": h,
+                "size_bytes": len(image_bytes),
+                "channels": 3,
+            },
+            "uncertainty_metrics": {
+                "shannon_entropy": round(entropy, 4),
+            },
+            "performance": {
+                "preprocessing_time_ms": round(preproc_ms, 2),
+                "inference_time_ms": round(infer_ms, 2),
+                "total_time_ms": round(total_elapsed_ms, 2),
+            },
+            "warnings": warnings,
+            "disclaimer": "Analyse expérimentale — non validée pour les alertes de sécurité routière",
+        }
+

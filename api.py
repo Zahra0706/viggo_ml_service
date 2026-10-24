@@ -20,6 +20,7 @@ SAMPLES_DIR = (BASE_DIR / "samples").resolve()
 # Constantes pour la validation des vidéos capturées
 MAX_VIDEO_SIZE_BYTES = 25 * 1024 * 1024  # 25 Mo max pour le prototype
 MAX_VIDEO_DURATION_SECONDS = 30.0        # 30 secondes max (prototype VIGGO = 8 secondes)
+MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024   # 5 Mo max pour une frame JPEG/PNG
 
 model = None
 model_lock = Lock()
@@ -351,4 +352,58 @@ async def predict_video_swin(
                 temp_path.unlink()
         except Exception:
             pass
+
+
+@app.post("/image/predict-swin")
+async def predict_image_swin(
+    file: UploadFile = File(...)
+):
+    """
+    Exécute l'inférence Swin Transformer ONNX sur une frame unique capturée en temps réel pendant un trajet.
+    - Accepte JPEG, PNG, WEBP.
+    - Validation stricte de taille (5 Mo max) et des magic bytes réels (aucun stockage disque ni MongoDB).
+    - Retourne la classe prédite, les 6 scores, la détection visage et les métriques de latence.
+    """
+    image_bytes = await file.read(MAX_IMAGE_SIZE_BYTES + 1)
+    if len(image_bytes) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Le fichier image est vide (0 octet)."
+        )
+
+    if len(image_bytes) > MAX_IMAGE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="La taille de l'image dépasse la limite maximale autorisée de 5 Mo."
+        )
+
+    # Validation des magic bytes réels (JPEG: \xFF\xD8\xFF, PNG: \x89PNG\r\n\x1a\n, WEBP: RIFF...WEBP)
+    is_jpeg = image_bytes.startswith(b"\xff\xd8\xff")
+    is_png = image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    is_webp = len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP"
+
+    if not (is_jpeg or is_png or is_webp):
+        raise HTTPException(
+            status_code=400,
+            detail="Format d'image non supporté ou signature invalide. Seuls JPEG, PNG et WEBP sont acceptés."
+        )
+
+    try:
+        swin_service = SwinInferenceService.get_instance()
+        result = swin_service.predict_image(image_bytes)
+        return {
+            "success": True,
+            "data": result
+        }
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=400,
+            detail=str(ve)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne lors de l'analyse de l'image : {str(e)}"
+        )
+
 
